@@ -412,6 +412,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
 	}
+	if !auth.NextRetryAfter.IsZero() {
+		entry["next_retry_after"] = auth.NextRetryAfter
+	}
 	if path != "" {
 		entry["path"] = path
 		entry["source"] = "file"
@@ -1929,8 +1932,6 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	state := fmt.Sprintf("gh-%d", time.Now().UnixNano())
 
 	// Initialize Copilot auth service
-	// We need to import "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/copilot" first if not present
-	// Assuming copilot package is imported as "copilot"
 	deviceClient := copilot.NewDeviceFlowClient(h.cfg)
 
 	// Initiate device flow
@@ -1944,7 +1945,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 	authURL := deviceCode.VerificationURI
 	userCode := deviceCode.UserCode
 
-	RegisterOAuthSession(state, "github")
+	RegisterOAuthSession(state, "github-copilot")
 
 	go func() {
 		fmt.Printf("Please visit %s and enter code: %s\n", authURL, userCode)
@@ -1956,9 +1957,13 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			return
 		}
 
-		username, errUser := deviceClient.FetchUserInfo(ctx, tokenData.AccessToken)
+		userInfo, errUser := deviceClient.FetchUserInfo(ctx, tokenData.AccessToken)
 		if errUser != nil {
 			log.Warnf("Failed to fetch user info: %v", errUser)
+		}
+
+		username := userInfo.Login
+		if username == "" {
 			username = "github-user"
 		}
 
@@ -1967,18 +1972,26 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 			TokenType:   tokenData.TokenType,
 			Scope:       tokenData.Scope,
 			Username:    username,
+			Email:       userInfo.Email,
+			Name:        userInfo.Name,
 			Type:        "github-copilot",
 		}
 
-		fileName := fmt.Sprintf("github-%s.json", username)
+		fileName := fmt.Sprintf("github-copilot-%s.json", username)
+		label := userInfo.Email
+		if label == "" {
+			label = username
+		}
 		record := &coreauth.Auth{
 			ID:       fileName,
-			Provider: "github",
+			Provider: "github-copilot",
+			Label:    label,
 			FileName: fileName,
 			Storage:  tokenStorage,
 			Metadata: map[string]any{
-				"email":    username,
+				"email":    userInfo.Email,
 				"username": username,
+				"name":     userInfo.Name,
 			},
 		}
 
@@ -1992,7 +2005,7 @@ func (h *Handler) RequestGitHubToken(c *gin.Context) {
 		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use GitHub Copilot services through this CLI")
 		CompleteOAuthSession(state)
-		CompleteOAuthSessionsByProvider("github")
+		CompleteOAuthSessionsByProvider("github-copilot")
 	}()
 
 	c.JSON(200, gin.H{
